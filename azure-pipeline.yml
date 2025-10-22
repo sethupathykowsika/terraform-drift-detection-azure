@@ -1,0 +1,216 @@
+trigger: none
+
+# schedules:
+#   - cron: "*/5 * * * *"
+#     displayName: Every 10 Minutes
+#     branches:
+#       include:
+#         - main
+#     always: true
+
+pool:
+  # name: xxxxxx # Define your self hosted agent pool or use Azure hosted agent config below
+  vmImage: 'ubuntu-latest'  # or windows-latest if preferred
+
+variables:
+  group: Infra_Drift_Vargroup # Azure DevOps Library variables group that you created
+
+  # Application-specific details as variables
+  appFolder: '$(Build.SourcesDirectory)/Terraform_files' #Path to the Application stack folder containing your terraform code
+  backendConfig: '$(Build.SourcesDirectory)/Terraform_files/backend.config' #Path to your tfbackend file in the appFolder
+  varFile: '$(Build.SourcesDirectory)/Terraform_files/input.auto.tfvars' #Path to your tfvars file in the appFolder
+  planOutputFile: '$(Build.SourcesDirectory)/Terraform_files/tfplan.tfplan' #Name of the terraform output file
+  driftReportFile: 'Driftreport.txt' #Name of the Drift Report
+  filteredDriftReportFile: 'Drift_filtered.txt' #Name of the Filtered Drift report
+  failOnDrift: true
+
+jobs:
+- job: Drift #to be updated for each Application stack pipeline
+  displayName: "Drift Checker" #to be updated for each Application stack pipeline
+  timeoutInMinutes: 600
+  steps:
+  - task: JasonBJohnson.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-installer.TerraformInstaller@1
+    displayName: "Install Terraform latest"
+    inputs:
+      terraformVersion: 'latest'
+
+  - script: |
+      cd $(appFolder)
+      terraform init -input=false -backend-config="$(backendConfig)" -upgrade
+    displayName: 'Terraform Init'
+    env:
+      ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+      ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+      ARM_TENANT_ID: $(ARM_TENANT_ID)
+      ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+  - script: |
+       cd $(appFolder)
+       terraform init -input=false -backend-config="$(backendConfig)" -upgrade
+       terraform plan -var-file="$(varFile)" -refresh-only -no-color -out=$(planOutputFile) || exit 0
+    displayName: 'Run Plan'
+    env:
+      ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+      ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+      ARM_TENANT_ID: $(ARM_TENANT_ID)
+      ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+  - script: |
+      cd $(appFolder)
+      terraform show -no-color $(planOutputFile) > $(driftReportFile)
+    displayName: 'Generate Drift Report'
+
+  - script: |
+      cd $(appFolder)
+      if grep -q "No changes. Infrastructure is up-to-date." $(driftReportFile); then
+        echo "##[section]No drift detected."
+        echo "##vso[task.setvariable variable=DriftDetected]false"
+      else
+        echo "##vso[task.logissue type=warning]Drift detected in infrastructure."
+        echo "##[section]Drift Details:"
+        cat $(driftReportFile)
+        echo "##vso[task.setvariable variable=DriftDetected]true"
+      fi
+    displayName: 'Check for Drift'
+
+  - task: UsePythonVersion@0
+    displayName: 'Use Python 3.x'
+    inputs:
+      versionSpec: '3.x'
+      addToPath: true
+
+  - script: |
+      python -m pip install --upgrade pip
+      pip install openai
+      pip install requests
+    displayName: 'Install Python Dependencies'
+
+  - task: PythonScript@0
+    displayName: 'Process Drift Report with Azure OpenAI LLM'
+    condition: eq(variables.DriftDetected, 'true')
+    inputs:
+      scriptPath: './Modules/drift_analyse_azureopenai.py'
+    env:
+      AZURE_OPENAI_API_KEY: D33QYMj12juPNwnrhn3y1OJhhjh1oMXX62Ol6KGK0bdnfosj08HPJQQJ99BHACYeBjFXJ3w3AAABACOGHuyZ
+      AZURE_OPENAI_API_BASE: https://driftchecker.openai.azure.com/openai/deployments/Driftdetectormodel/chat/completions?api-version=2025-01-01-preview
+      APP_FOLDER: $(appFolder)
+      DRIFT_REPORT_FILE: $(driftReportFile)
+      FILTERED_DRIFT_REPORT_FILE: $(filteredDriftReportFile)
+
+  # - task: PythonScript@0
+  #   displayName: 'Send Filtered Drift Report to Azure Monitor'
+  #   condition: eq(variables.DriftDetected, 'true')
+  #   inputs:
+  #     scriptPath: './Modules/drift_sent_to_loganalytics.py'
+  #   env:
+  #     LAWorkspaceID: '$(LAWorkspaceID)'
+  #     LAWorkspaceKey: '$(LAWorkspaceKey)'
+  #     appFolder: '$(appFolder)'
+  #     filteredDriftReportFile: '$(filteredDriftReportFile)'
+  #     Build_DefinitionName: '$(Build.DefinitionName)'
+  #     Build_BuildId: '$(Build.BuildId)'
+
+  # - publish: $(appFolder)/$(filteredDriftReportFile)
+  #   artifact: drift-report
+  #   displayName: 'Publish Filtered Drift Report'
+
+  # - task: PythonScript@0
+  #   displayName: 'Send Drift Report to Microsoft Teams'
+  #   condition: eq(variables.DriftDetected, 'true')
+  #   inputs:
+  #     scriptPath: './Modules/drift_send_to_msteams.py'
+  #   env:
+  #     Build_DefinitionName: '$(Build.DefinitionName)'
+  #     Build_BuildId: '$(Build.BuildId)'
+  #     appFolder: $(appFolder)
+  #     filteredDriftReportFile: $(filteredDriftReportFile)
+
+  - task: PythonScript@0
+    displayName: 'Send Drift Report via Email'
+    condition: eq(variables.DriftDetected, 'true')
+    inputs:
+      scriptPath: './Modules/drift_send_email.py'
+    env:
+      APP_FOLDER: $(appFolder)
+      FILTERED_DRIFT_REPORT_FILE: $(filteredDriftReportFile)
+      SMTP_PASSWORD: $(SMTP_PASSWORD)
+
+
+
+
+
+
+
+  
+
+# trigger: none
+
+# pool:
+#   vmImage: 'ubuntu-latest'
+
+# variables:
+#   # Terraform & Python config
+#   APP_FOLDER: 'Terraform_files'
+#   DRIFT_REPORT_FILE: 'drift_report.txt'
+#   FILTERED_DRIFT_REPORT_FILE: 'filtered_drift_report.txt'
+#   PYTHON_SCRIPT_PATH: 'Modules/drift_analyse_azureopenai.py'
+
+#   # Azure auth (Service Principal)
+#   ARM_SUBSCRIPTION_ID: '4a7cde05-faf5-4c3e-b3f0-b7f59e058b66'
+#   ARM_TENANT_ID: 'a59d6e59-864b-4af8-8ea0-b4eb441cfbd9'
+#   ARM_CLIENT_ID: '788b584d-1453-42cd-aa0f-02a1ac483de9'
+#   ARM_CLIENT_SECRET: '6Op8Q~X0SbUhCDjUtWKOqgNOIMHJE.TE-RfN1co9'
+
+# jobs:
+# - job: Drift_Detection
+#   displayName: 'Terraform Drift Detection'
+#   steps:
+#     - checkout: self
+
+#     # Install Terraform
+#     - task: charleszipp.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-installer.TerraformInstaller@1
+#       inputs:
+#         terraformVersion: 'latest'
+#       displayName: 'Install Terraform'
+
+#     # Terraform Init
+#     - script: |
+#         export ARM_SUBSCRIPTION_ID=$(ARM_SUBSCRIPTION_ID)
+#         export ARM_TENANT_ID=$(ARM_TENANT_ID)
+#         export ARM_CLIENT_ID=$(ARM_CLIENT_ID)
+#         export ARM_CLIENT_SECRET=$(ARM_CLIENT_SECRET)
+#         cd $(APP_FOLDER)
+#         terraform init
+#       displayName: 'Terraform Init'
+
+#     # Terraform Plan
+#     - script: |
+#         export ARM_SUBSCRIPTION_ID=$(ARM_SUBSCRIPTION_ID)
+#         export ARM_TENANT_ID=$(ARM_TENANT_ID)
+#         export ARM_CLIENT_ID=$(ARM_CLIENT_ID)
+#         export ARM_CLIENT_SECRET=$(ARM_CLIENT_SECRET)
+#         cd $(APP_FOLDER)
+#         terraform plan -no-color > $(DRIFT_REPORT_FILE)
+#       displayName: 'Terraform Plan'
+
+#     # Install Python dependencies
+#     - script: |
+#         pip install openai
+#       displayName: 'Install Python Dependencies'
+
+#     # Run drift analysis with OpenAI (key is hardcoded below)
+#     - script: |
+#         export OPENAI_API_KEY="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"
+#         export APP_FOLDER=$(APP_FOLDER)
+#         export DRIFT_REPORT_FILE=$(DRIFT_REPORT_FILE)
+#         export FILTERED_DRIFT_REPORT_FILE=$(FILTERED_DRIFT_REPORT_FILE)
+#         python $(PYTHON_SCRIPT_PATH)
+#       displayName: 'Analyze Drift with OpenAI'
+
+#     # Publish final report
+#     - task: PublishBuildArtifacts@1
+#       inputs:
+#         PathtoPublish: '$(APP_FOLDER)/$(FILTERED_DRIFT_REPORT_FILE)'
+#         ArtifactName: 'FilteredDriftReport'
+#         publishLocation: 'Container'
+#       displayName: 'Publish Filtered Drift Report'
